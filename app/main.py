@@ -215,3 +215,10 @@ async def ws_transcribe(ws: WebSocket):
                 await ws.close()
             except Exception:
                 pass
+
+
+# Alias route för /ws som använder samma logik som /ws/transcribe
+@app.websocket("/ws")
+async def ws_alias(ws: WebSocket):
+    # Återanvänd exakt samma logik som i ws_transcribe
+    await ws_transcribe(ws)
