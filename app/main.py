@@ -107,8 +107,14 @@ async def debug_reset(session_id: str | None = Query(None)):
 @app.websocket("/ws/transcribe")
 async def ws_transcribe(ws: WebSocket):
     await ws.accept()
+    
+    # A är default: JSON, B som fallback: ren text
+    mode = (ws.query_params.get("mode") or os.getenv("WS_DEFAULT_MODE", "json")).lower()
+    send_json = (mode == "json")
+    
     session_id = store.new_session()
-    await ws.send_json({"type": "session.started", "session_id": session_id})
+    if send_json:
+        await ws.send_json({"type": "session.started", "session_id": session_id})
 
     # Setup klient mot OpenAI/Azure Realtime
     rt = OpenAIRealtimeClient(
@@ -145,10 +151,12 @@ async def ws_transcribe(ws: WebSocket):
                 # fallback: skicka hela
                 delta = transcript
 
-            if delta:
+            if delta and ws.client_state == WebSocketState.CONNECTED:
                 buffers.openai_text.append(transcript)
-                if ws.client_state == WebSocketState.CONNECTED:
+                if send_json:
                     await ws.send_json({"type": "transcript.delta", "delta": delta, "text": transcript})
+                else:
+                    await ws.send_text(delta)  # fallback B: rå text
                 buffers.frontend_text.append(delta)
                 last_text = transcript
 
