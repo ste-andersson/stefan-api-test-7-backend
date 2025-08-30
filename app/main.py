@@ -133,6 +133,7 @@ async def ws_transcribe(ws: WebSocket):
     
     # Flagga för att veta om vi har skickat ljud
     has_audio = False
+    last_audio_time = 0  # Timestamp för senaste ljud
 
     # Task: läs events från Realtime och skicka deltas till frontend
     async def on_rt_event(evt: dict):
@@ -205,12 +206,22 @@ async def ws_transcribe(ws: WebSocket):
                 await asyncio.sleep(max(0.001, settings.commit_interval_ms / 1000))
                 # Bara committa om vi har skickat ljud
                 if has_audio:
+                    # Kontrollera om det har gått för lång tid sedan senaste ljudet
+                    import time
+                    if time.time() - last_audio_time > 2.0:  # 2 sekunder timeout
+                        has_audio = False
+                        log.debug("Timeout - återställer has_audio flaggan")
+                        continue
+                    
                     try:
                         await rt.commit()
                     except Exception as e:
                         # Hantera "buffer too small" fel mer elegant
                         if "buffer too small" in str(e) or "input_audio_buffer_commit_empty" in str(e):
                             log.debug("Buffer för liten, väntar på mer ljud: %s", e)
+                            # Om buffern är helt tom, återställ has_audio flaggan
+                            if "0.00ms of audio" in str(e):
+                                has_audio = False
                             continue  # Fortsätt loopen istället för att bryta
                         else:
                             log.warning("Commit fel: %s", e)
@@ -231,6 +242,8 @@ async def ws_transcribe(ws: WebSocket):
                         await rt.send_audio_chunk(chunk)
                         buffers.openai_chunks.append(len(chunk))
                         has_audio = True  # Markera att vi har skickat ljud
+                        import time
+                        last_audio_time = time.time()  # Uppdatera timestamp
                     except Exception as e:
                         log.error("Fel när chunk skickades till Realtime: %s", e)
                         break
