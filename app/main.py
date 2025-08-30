@@ -208,8 +208,13 @@ async def ws_transcribe(ws: WebSocket):
                     try:
                         await rt.commit()
                     except Exception as e:
-                        log.warning("Commit fel: %s", e)
-                        break
+                        # Hantera "buffer too small" fel mer elegant
+                        if "buffer too small" in str(e) or "input_audio_buffer_commit_empty" in str(e):
+                            log.debug("Buffer för liten, väntar på mer ljud: %s", e)
+                            continue  # Fortsätt loopen istället för att bryta
+                        else:
+                            log.warning("Commit fel: %s", e)
+                            break
         except asyncio.CancelledError:
             pass
 

@@ -12,7 +12,7 @@ class Settings(BaseModel):
     realtime_url: str = os.getenv("REALTIME_URL", "wss://api.openai.com/v1/realtime?model=gpt-4o-mini-realtime-preview-2024-12-17")
     transcribe_model: str = os.getenv("REALTIME_TRANSCRIBE_MODEL", "gpt-4o-mini-transcribe")
     input_language: str = os.getenv("INPUT_LANGUAGE", "sv")
-    commit_interval_ms: int = int(os.getenv("COMMIT_INTERVAL_MS", "250"))
+    commit_interval_ms: int = int(os.getenv("COMMIT_INTERVAL_MS", "500"))
     add_beta_header: bool = os.getenv("OPENAI_ADD_BETA_HEADER", "1") not in ("0", "", "false", "False")
     cors_origins: str = os.getenv(
         "CORS_ORIGINS",
