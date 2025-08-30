@@ -37,16 +37,25 @@ class OpenAIRealtimeClient:
         self._connected = asyncio.Event()
 
     async def connect(self) -> None:
-        headers = [("Authorization", f"Bearer {self.api_key}")]
-        if self.add_beta_header:
-            # Historiskt krävs/krävdes denna header för OpenAI Realtime
-            headers.append(("OpenAI-Beta", "realtime=v1"))
+        # Headers: Azure vs OpenAI
+        headers = []
+        if ".openai.azure.com" in self.url:
+            headers.append(("api-key", self.api_key))
+        else:
+            headers.append(("Authorization", f"Bearer {self.api_key}"))
+            if self.add_beta_header:
+                headers.append(("OpenAI-Beta", "realtime=v1"))
 
-        self.ws = await websockets.connect(self.url, extra_headers=headers, max_size=32 * 1024 * 1024)
+        # WS connect
+        self.ws = await websockets.connect(
+            self.url,
+            extra_headers=headers,
+            max_size=32 * 1024 * 1024,
+        )
         self._connected.set()
 
-        # Konfigurera sessionen för transkription på svenska med PCM16
-        session_update: JsonDict = {
+        # Konfigurera sessionen (pcm16 + transcribe-modell + språk)
+        session_update = {
             "type": "session.update",
             "session": {
                 "modalities": ["text", "audio"],
@@ -55,8 +64,7 @@ class OpenAIRealtimeClient:
                     "model": self.transcribe_model,
                     "language": self.language,
                 },
-                # Vi låter klienten hantera commits för tätare deltas
-                "turn_detection": None,
+                "turn_detection": None,  # alt: {"type": "server_vad"}
             },
         }
         await self.ws.send(json.dumps(session_update))

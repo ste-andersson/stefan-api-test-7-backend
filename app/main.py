@@ -98,6 +98,12 @@ async def debug_frontend_text(session_id: str = Query(...), limit: int = Query(2
     data = list(buf.frontend_text)[-limit:]
     return DebugListOut(session_id=session_id, data=data)
 
+@app.get("/debug/rt-events", response_model=DebugListOut)
+async def debug_rt_events(session_id: str = Query(...), limit: int = Query(200, ge=1, le=2000)):
+    buf = store.get_or_create(session_id)
+    data = list(buf.rt_events)[-limit:]
+    return DebugListOut(session_id=session_id, data=data)
+
 @app.post("/debug/reset")
 async def debug_reset(session_id: str | None = Query(None)):
     store.reset(session_id)
@@ -124,7 +130,16 @@ async def ws_transcribe(ws: WebSocket):
         language=settings.input_language,
         add_beta_header=settings.add_beta_header,
     )
-    await rt.connect()
+    
+    try:
+        await rt.connect()
+    except Exception as e:
+        if send_json and ws.client_state == WebSocketState.CONNECTED:
+            await ws.send_json({"type": "error", "reason": "realtime_connect_failed", "detail": str(e)})
+        return
+    else:
+        if send_json and ws.client_state == WebSocketState.CONNECTED:
+            await ws.send_json({"type": "info", "msg": "realtime_connected"})
 
     buffers = store.get_or_create(session_id)
 
@@ -139,53 +154,49 @@ async def ws_transcribe(ws: WebSocket):
     async def on_rt_event(evt: dict):
         nonlocal last_text
         t = evt.get("type")
-        
-        # Logga alltid eventtypen för /debug/rt-events
+
+        # (A) logga alltid eventtyp för felsökning (/debug/rt-events om ni har det)
         try:
             buffers.rt_events.append(str(t))
         except Exception:
             pass
 
-        # 1) Tydlig felkanal till frontend
+        # (B) bubbla upp error/info till klienten (syns i browser-konsol)
         if t == "error":
             detail = evt.get("error", evt)
-            if ws.client_state == WebSocketState.CONNECTED:
+            if send_json and ws.client_state == WebSocketState.CONNECTED:
                 await ws.send_json({"type": "error", "reason": "realtime_error", "detail": detail})
             return
-
-        # 2) Bekräfta att session.update slog igenom
         if t == "session.updated":
-            if ws.client_state == WebSocketState.CONNECTED:
+            if send_json and ws.client_state == WebSocketState.CONNECTED:
                 await ws.send_json({"type": "info", "msg": "realtime_connected_and_configured"})
             return
 
+        # (C) försök extrahera transcript från flera varianter
         transcript = None
 
-        # A) Klassiska transkriptionsdelar (OpenAI/Azure)
+        # 1) Vanligaste: conversation.item.input_audio_transcription.delta/completed
         if t and "input_audio_transcription" in t:
-            # försök direktfält
             transcript = evt.get("transcript") or evt.get("text")
-            # eller nested i item.content[0]
-            if not transcript:
-                item = evt.get("item") or {}
-                contents = item.get("content") or []
+            if not transcript and isinstance(evt.get("item"), dict):
+                contents = evt["item"].get("content") or []
                 if contents and isinstance(contents[0], dict):
                     transcript = contents[0].get("transcript") or contents[0].get("text")
 
-        # B) Vissa upplägg skickar "response.audio_transcript.*"
+        # 2) Alternativ nomenklatur: response.audio_transcript.delta/completed
         if not transcript and (t in ("response.audio_transcript.delta", "response.audio_transcript.completed")):
             transcript = evt.get("transcript") or evt.get("text") or evt.get("delta")
 
-        # C) Fallback: text-delta
+        # 3) Sista fallback: response.output_text.delta (text-delning)
         if not transcript and t == "response.output_text.delta":
             delta_txt = evt.get("delta")
             if isinstance(delta_txt, str):
                 transcript = (last_text or "") + delta_txt
 
         if not isinstance(transcript, str) or not transcript:
-            return  # inget att skicka
+            return
 
-        # Räkna ut delta för UI
+        # (D) beräkna delta och skicka till frontend
         delta = transcript[len(last_text):] if transcript.startswith(last_text) else transcript
 
         if delta and ws.client_state == WebSocketState.CONNECTED:
@@ -193,7 +204,7 @@ async def ws_transcribe(ws: WebSocket):
             if send_json:
                 await ws.send_json({"type": "transcript.delta", "delta": delta, "text": transcript})
             else:
-                await ws.send_text(delta)  # fallback B: rå text
+                await ws.send_text(delta)  # fallback: ren text
             buffers.frontend_text.append(delta)
             last_text = transcript
 
@@ -235,6 +246,9 @@ async def ws_transcribe(ws: WebSocket):
         while ws.client_state == WebSocketState.CONNECTED:
             try:
                 msg = await ws.receive()
+            except RuntimeError as e:
+                log.info("WS disconnect during receive(): %s", e)
+                break
                 if "bytes" in msg and msg["bytes"] is not None:
                     chunk = msg["bytes"]
                     buffers.frontend_chunks.append(len(chunk))
@@ -274,8 +288,8 @@ async def ws_transcribe(ws: WebSocket):
             await asyncio.gather(commit_task, rt_recv_task, return_exceptions=True)
         except Exception:
             pass
-        # Kontrollera att WebSocket fortfarande är öppen innan vi stänger
-        if ws.client_state == WebSocketState.CONNECTED:
+        # Stäng WebSocket bara om den inte redan är stängd
+        if ws.client_state != WebSocketState.DISCONNECTED:
             try:
                 await ws.close()
             except Exception:

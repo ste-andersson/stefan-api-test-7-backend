@@ -12,6 +12,7 @@ class SessionBuffers:
         self.openai_chunks: Deque[int] = deque(maxlen=max_items)     # store byte lengths (after b64 append)
         self.openai_text: Deque[str] = deque(maxlen=max_items)
         self.frontend_text: Deque[str] = deque(maxlen=max_items)
+        self.rt_events: Deque[str] = deque(maxlen=max_items)
 
 class DebugStore:
     def __init__(self):
