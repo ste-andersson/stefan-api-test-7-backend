@@ -130,6 +130,9 @@ async def ws_transcribe(ws: WebSocket):
 
     # Hålla senaste text för enkel diff
     last_text = ""
+    
+    # Flagga för att veta om vi har skickat ljud
+    has_audio = False
 
     # Task: läs events från Realtime och skicka deltas till frontend
     async def on_rt_event(evt: dict):
@@ -200,11 +203,13 @@ async def ws_transcribe(ws: WebSocket):
         try:
             while True:
                 await asyncio.sleep(max(0.001, settings.commit_interval_ms / 1000))
-                try:
-                    await rt.commit()
-                except Exception as e:
-                    log.warning("Commit fel: %s", e)
-                    break
+                # Bara committa om vi har skickat ljud
+                if has_audio:
+                    try:
+                        await rt.commit()
+                    except Exception as e:
+                        log.warning("Commit fel: %s", e)
+                        break
         except asyncio.CancelledError:
             pass
 
@@ -220,6 +225,7 @@ async def ws_transcribe(ws: WebSocket):
                     try:
                         await rt.send_audio_chunk(chunk)
                         buffers.openai_chunks.append(len(chunk))
+                        has_audio = True  # Markera att vi har skickat ljud
                     except Exception as e:
                         log.error("Fel när chunk skickades till Realtime: %s", e)
                         break
