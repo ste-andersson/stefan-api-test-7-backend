@@ -58,13 +58,20 @@ class OpenAIRealtimeClient:
         session_update = {
             "type": "session.update",
             "session": {
-                "modalities": ["text", "audio"],
+                "modalities": ["text"],  # räcker för STT
                 "input_audio_format": "pcm16",
                 "input_audio_transcription": {
-                    "model": self.transcribe_model,
+                    "model": "whisper-1",  # samma som repo 2 för kompatibilitet
                     "language": self.language,
                 },
-                "turn_detection": None,  # alt: {"type": "server_vad"}
+                "turn_detection": {
+                    "type": "server_vad",
+                    "threshold": 0.5,
+                    "prefix_padding_ms": 300,
+                    "silence_duration_ms": 500,
+                    "create_response": False,  # vi vill bara STT
+                    "interrupt_response": True
+                },
             },
         }
         await self.ws.send(json.dumps(session_update))

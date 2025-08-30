@@ -119,7 +119,14 @@ async def ws_transcribe(ws: WebSocket):
     send_json = (mode == "json")
     
     session_id = store.new_session()
+    
+    # Skicka "ready" meddelande för kompatibilitet med frontend
     if send_json:
+        await ws.send_json({
+            "type": "ready",
+            "audio_in": {"encoding": "pcm16", "sample_rate_hz": 16000, "channels": 1},
+            "audio_out": {"mimetype": "audio/mpeg"},
+        })
         await ws.send_json({"type": "session.started", "session_id": session_id})
 
     # Setup klient mot OpenAI/Azure Realtime
@@ -175,16 +182,15 @@ async def ws_transcribe(ws: WebSocket):
         # (C) försök extrahera transcript från flera varianter
         transcript = None
 
-        # 1) Vanligaste: conversation.item.input_audio_transcription.delta/completed
-        if t and "input_audio_transcription" in t:
-            transcript = evt.get("transcript") or evt.get("text")
-            if not transcript and isinstance(evt.get("item"), dict):
-                contents = evt["item"].get("content") or []
-                if contents and isinstance(contents[0], dict):
-                    transcript = contents[0].get("transcript") or contents[0].get("text")
+        # 1) Klassisk Realtime-transkript (som repo 2 använder) - whisper-1 + server VAD
+        if t == "conversation.item.input_audio_transcription.completed":
+            transcript = (
+                evt.get("transcript")
+                or evt.get("item", {}).get("content", [{}])[0].get("transcript")
+            )
 
         # 2) Alternativ nomenklatur: response.audio_transcript.delta/completed
-        if not transcript and (t in ("response.audio_transcript.delta", "response.audio_transcript.completed")):
+        if not transcript and t in ("response.audio_transcript.delta", "response.audio_transcript.completed"):
             transcript = evt.get("transcript") or evt.get("text") or evt.get("delta")
 
         # 3) Sista fallback: response.output_text.delta (text-delning)
@@ -201,8 +207,18 @@ async def ws_transcribe(ws: WebSocket):
 
         if delta and ws.client_state == WebSocketState.CONNECTED:
             buffers.openai_text.append(transcript)
+            
+            # Bestäm om detta är final eller partial transcript
+            is_final = t in (
+                "conversation.item.input_audio_transcription.completed",
+                "response.audio_transcript.completed",
+            )
+            
             if send_json:
-                await ws.send_json({"type": "transcript.delta", "delta": delta, "text": transcript})
+                await ws.send_json({
+                    "type": "stt.final" if is_final else "stt.partial",
+                    "text": transcript
+                })
             else:
                 await ws.send_text(delta)  # fallback: ren text
             buffers.frontend_text.append(delta)
@@ -246,9 +262,7 @@ async def ws_transcribe(ws: WebSocket):
         while ws.client_state == WebSocketState.CONNECTED:
             try:
                 msg = await ws.receive()
-            except RuntimeError as e:
-                log.info("WS disconnect during receive(): %s", e)
-                break
+
                 if "bytes" in msg and msg["bytes"] is not None:
                     chunk = msg["bytes"]
                     buffers.frontend_chunks.append(len(chunk))
@@ -271,8 +285,12 @@ async def ws_transcribe(ws: WebSocket):
                 else:
                     # okänt format
                     pass
+
             except WebSocketDisconnect:
                 log.info("WebSocket stängd: %s", session_id)
+                break
+            except RuntimeError as e:
+                log.info("WS disconnect during receive(): %s", e)
                 break
             except Exception as e:
                 log.error("WebSocket fel: %s", e)
