@@ -135,30 +135,63 @@ async def ws_transcribe(ws: WebSocket):
     async def on_rt_event(evt: dict):
         nonlocal last_text
         t = evt.get("type")
-        if t == "conversation.item.input_audio_transcription.completed":
-            transcript = evt.get("transcript") or ""
-            # För vissa servervarianter ligger transcriptet i evt['transcript'],
-            # annars kan den ligga i evt.get('item', {}). Hantera båda.
-            if not transcript and isinstance(evt.get("item"), dict):
-                transcript = evt["item"].get("content", [{}])[0].get("transcript", "")
-            if not isinstance(transcript, str):
-                return
+        
+        # Logga alltid eventtypen för /debug/rt-events
+        try:
+            buffers.rt_events.append(str(t))
+        except Exception:
+            pass
 
-            # Beräkna "delta" för ord-för-ord-känsla
-            if transcript.startswith(last_text):
-                delta = transcript[len(last_text):]
+        # 1) Tydlig felkanal till frontend
+        if t == "error":
+            detail = evt.get("error", evt)
+            if ws.client_state == WebSocketState.CONNECTED:
+                await ws.send_json({"type": "error", "reason": "realtime_error", "detail": detail})
+            return
+
+        # 2) Bekräfta att session.update slog igenom
+        if t == "session.updated":
+            if ws.client_state == WebSocketState.CONNECTED:
+                await ws.send_json({"type": "info", "msg": "realtime_connected_and_configured"})
+            return
+
+        transcript = None
+
+        # A) Klassiska transkriptionsdelar (OpenAI/Azure)
+        if t and "input_audio_transcription" in t:
+            # försök direktfält
+            transcript = evt.get("transcript") or evt.get("text")
+            # eller nested i item.content[0]
+            if not transcript:
+                item = evt.get("item") or {}
+                contents = item.get("content") or []
+                if contents and isinstance(contents[0], dict):
+                    transcript = contents[0].get("transcript") or contents[0].get("text")
+
+        # B) Vissa upplägg skickar "response.audio_transcript.*"
+        if not transcript and (t in ("response.audio_transcript.delta", "response.audio_transcript.completed")):
+            transcript = evt.get("transcript") or evt.get("text") or evt.get("delta")
+
+        # C) Fallback: text-delta
+        if not transcript and t == "response.output_text.delta":
+            delta_txt = evt.get("delta")
+            if isinstance(delta_txt, str):
+                transcript = (last_text or "") + delta_txt
+
+        if not isinstance(transcript, str) or not transcript:
+            return  # inget att skicka
+
+        # Räkna ut delta för UI
+        delta = transcript[len(last_text):] if transcript.startswith(last_text) else transcript
+
+        if delta and ws.client_state == WebSocketState.CONNECTED:
+            buffers.openai_text.append(transcript)
+            if send_json:
+                await ws.send_json({"type": "transcript.delta", "delta": delta, "text": transcript})
             else:
-                # fallback: skicka hela
-                delta = transcript
-
-            if delta and ws.client_state == WebSocketState.CONNECTED:
-                buffers.openai_text.append(transcript)
-                if send_json:
-                    await ws.send_json({"type": "transcript.delta", "delta": delta, "text": transcript})
-                else:
-                    await ws.send_text(delta)  # fallback B: rå text
-                buffers.frontend_text.append(delta)
-                last_text = transcript
+                await ws.send_text(delta)  # fallback B: rå text
+            buffers.frontend_text.append(delta)
+            last_text = transcript
 
     rt_recv_task = asyncio.create_task(rt.recv_loop(on_rt_event))
 
